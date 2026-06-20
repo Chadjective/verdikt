@@ -33,7 +33,7 @@ function nowUnix(): bigint {
 }
 
 /** sendTransaction() resolves to the signature (string brand) or an object with one. */
-function extractSignature(r: unknown): string {
+export function extractSignature(r: unknown): string {
   if (typeof r === "string") return r;
   if (r && typeof r === "object") {
     const o = r as Record<string, unknown>;

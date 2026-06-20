@@ -20,7 +20,9 @@ import type {
  * agent are separate processes, so state is persisted to disk and shared.
  */
 
-const LEDGER_PATH = process.env.MOCK_LEDGER ?? ".keys/mock-ledger.json";
+function ledgerPath(): string {
+  return process.env.MOCK_LEDGER ?? ".keys/mock-ledger.json";
+}
 
 interface AllowanceRow {
   remaining: string;
@@ -59,7 +61,7 @@ function emptyLedger(): Ledger {
 
 async function load(): Promise<Ledger> {
   try {
-    const raw = await fs.readFile(LEDGER_PATH, "utf8");
+    const raw = await fs.readFile(ledgerPath(), "utf8");
     return { ...emptyLedger(), ...(JSON.parse(raw) as Partial<Ledger>) };
   } catch {
     return emptyLedger();
@@ -67,8 +69,9 @@ async function load(): Promise<Ledger> {
 }
 
 async function save(l: Ledger): Promise<void> {
-  await fs.mkdir(path.dirname(LEDGER_PATH), { recursive: true });
-  await fs.writeFile(LEDGER_PATH, JSON.stringify(l, null, 2));
+  const p = ledgerPath();
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(p, JSON.stringify(l, null, 2));
 }
 
 function nowUnix(): bigint {
