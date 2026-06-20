@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:chain": "vitest run src/payments/chain.devnet.test.ts",
     "setup": "tsx src/scripts/setup.ts",
+    "setup:chain": "tsx src/scripts/create-mint.ts",
     "allowance:grant": "tsx src/scripts/grant-allowance.ts",
     "plan:create": "tsx src/scripts/create-plan.ts",
     "plan:subscribe": "tsx src/scripts/subscribe.ts",
@@ -20,6 +22,7 @@
     "agent": "tsx src/agent/agent.ts"
   },
   "dependencies": {
+    "@solana-program/system": "^0.12.2",
     "@solana-program/token": "^0.13.0",
     "@solana/kit": "^6.4.0",
     "@solana/kit-plugin-rpc": "^0.11.1",
