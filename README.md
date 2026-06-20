@@ -134,7 +134,7 @@ curl "http://127.0.0.1:4021/api/check/subscription?entity=GhostBridge" \
      -H "x-subscriber: <USER_ADDRESS_FROM_SETUP>"
 ```
 
-`npm run typecheck` validates every SDK call against the published types.
+`npm run typecheck` validates every SDK call against the published types; `npm test` runs the unit suite (31 tests).
 
 ---
 

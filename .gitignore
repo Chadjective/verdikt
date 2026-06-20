@@ -6,3 +6,6 @@ dist/
 .keys/
 *.keypair.json
 .DS_Store
+
+# bounty writeup drafts (kept out of the public repo until published)
+_drafts/
