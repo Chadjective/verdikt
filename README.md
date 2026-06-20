@@ -1,8 +1,6 @@
-# avoid-meter
+# Verdikt
 
-> Working name — being renamed (Outrider / Verdikt / …).
-
-**On-demand crypto threat-intelligence, billed on Solana's native Subscriptions & Allowances.**
+**Pay-per-verdict crypto threat-intelligence, billed on Solana's native Subscriptions & Allowances.**
 One paywall, two products: an **instant cached verdict** (pre-pay, x402-style) or a **freshly commissioned investigation** (pay-on-completion). Built for AI agents and humans — settled on-chain, no card processor, no accounts.
 
 > Built for the Superteam Canada *Solana Subscriptions & Allowances* demo track.
@@ -175,7 +173,7 @@ Same scripts, real program. **Plain SPL only** (the program's Token-2022 extensi
 
 ## Canadian relevance
 
-- **avoid-meter / Avoid.net** is built in Canada (Colosseum Frontier hackathon).
+- **Verdikt / Avoid.net** is built in Canada (Colosseum Frontier hackathon).
 - **Figment** (Toronto) — Solana staking/infra — could meter node & data APIs with on-chain tiers, like Helius.
 - Canadian Web2 that would benefit from native recurring + delegated, metered spend:
   - **Shopify** (Ottawa) — merchant subscriptions / recurring billing in stablecoins.
