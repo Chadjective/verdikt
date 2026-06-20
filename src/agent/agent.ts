@@ -1,98 +1,102 @@
 import { activeMint, config, fmtToken, serverBaseUrl } from "../config";
 import { createPaymentBackend } from "../payments";
 import { loadWallet } from "../solana/client";
-import { decisionLine } from "../avoid/threatApi";
+import { decisionLine, type ThreatReport } from "../avoid/threatApi";
 
 /**
  * An autonomous agent that screens tokens with Avoid.net BEFORE interacting.
- * It holds a delegated, capped, self-expiring allowance (granted by its owner)
- * and pays per threat-check, x402-style. When the budget is exhausted the pull
- * fails and the agent stops -- the on-chain cap doing its job.
+ * It draws on TWO delegated budgets (one token account, two delegations -- the
+ * thing raw SPL `approve` cannot do):
+ *   - user -> agent      : instant cached checks, agent pays per call (x402)
+ *   - user -> Avoid.net  : on-demand investigations, server pulls on completion
+ * When a budget is exhausted the pull fails and the agent moves on.
  */
 const WATCHLIST = [
-  "Acme Exchange",
-  "DrainCoin",
-  "GhostBridge",
-  "NovaSwap (unlisted)",
-  "Acme Exchange",
-  "DrainCoin",
-  "GhostBridge",
+  "Acme Exchange", // known  -> cache
+  "DrainCoin", // known  -> cache (avoid)
+  "PhantomYield", // unknown -> investigation
+  "GhostBridge", // known  -> cache (avoid)
+  "NovaSwap", // unknown -> investigation
+  "ZyptoVault", // unknown -> investigation (budget likely spent)
+  "DrainCoin", // known  -> cache
 ];
 
-interface Quote {
+interface CheckQuote {
   price: string;
   payTo: string;
 }
 
+function logResult(entity: string, amount: bigint, tier: string, rep: ThreatReport): void {
+  console.log(`  paid ${fmtToken(amount)} [${tier}]  ${decisionLine(rep)}`);
+  if (rep.verdict === "avoid") console.log(`    !! ABORTING interaction with "${entity}"`);
+}
+
 async function main(): Promise<void> {
   const backend = createPaymentBackend();
-  const agent = await loadWallet(config.keypairs.agent); // delegatee (spender)
-  const user = await loadWallet(config.keypairs.user); // delegator (budget owner)
+  const agent = await loadWallet(config.keypairs.agent);
+  const user = await loadWallet(config.keypairs.user);
+  const merchant = await loadWallet(config.keypairs.merchant);
   const mint = activeMint();
   const base = serverBaseUrl();
 
   console.log(`Agent ${agent.address}`);
   console.log(`Budget owner (delegator): ${user.address}`);
-  const before = await backend.allowanceStatus({
-    delegator: user.address,
-    delegatee: agent.address,
-    mint,
-  });
-  if (!before.exists) {
-    console.error("No allowance granted. Run `npm run allowance:grant` first.");
-    process.exit(1);
-  }
-  console.log(`Allowance remaining: ${fmtToken(before.remaining)}\n`);
+  const checkBudget = await backend.allowanceStatus({ delegator: user.address, delegatee: agent.address, mint });
+  const invBudget = await backend.allowanceStatus({ delegator: user.address, delegatee: merchant.address, mint });
+  console.log(`  check budget       (user -> agent)     : ${fmtToken(checkBudget.remaining)}`);
+  console.log(`  investigation budget (user -> Avoid.net): ${fmtToken(invBudget.remaining)}\n`);
 
-  let checks = 0;
-  let spent = 0n;
   for (const entity of WATCHLIST) {
-    const quoteRes = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`);
-    if (quoteRes.status !== 402) {
-      console.log(`  ${entity}: unexpected status ${quoteRes.status}`);
-      continue;
-    }
-    const quote = (await quoteRes.json()) as Quote;
-    const amount = BigInt(quote.price);
+    const res = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`);
 
-    let reference: string;
-    try {
-      const proof = await backend.payPerCall({
-        delegatee: agent,
-        delegator: user.address,
-        mint,
-        merchantAta: quote.payTo,
-        amount,
+    if (res.status === 402) {
+      // Known entity: pre-pay per cached check (agent is the delegatee).
+      const quote = (await res.json()) as CheckQuote;
+      const amount = BigInt(quote.price);
+      let reference: string;
+      try {
+        const proof = await backend.payPerCall({
+          delegatee: agent,
+          delegator: user.address,
+          mint,
+          merchantAta: quote.payTo,
+          amount,
+        });
+        reference = proof.reference;
+      } catch (err) {
+        console.log(`  ${entity}: check budget spent (${(err as Error).message})`);
+        continue;
+      }
+      const served = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`, {
+        headers: { "x-payment": reference },
       });
-      reference = proof.reference;
-    } catch (err) {
-      console.log(`\n  ${entity}: cannot pay -> ${(err as Error).message}`);
-      console.log("  Budget exhausted. Agent stops. (allowance cap enforced)\n");
-      break;
-    }
-
-    const dataRes = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`, {
-      headers: { "x-payment": reference },
-    });
-    if (!dataRes.ok) {
-      console.log(`  ${entity}: payment rejected (${dataRes.status})`);
-      continue;
-    }
-    const data = (await dataRes.json()) as { report: Parameters<typeof decisionLine>[0] };
-    checks += 1;
-    spent += amount;
-    console.log(`  paid ${fmtToken(amount)}  ${decisionLine(data.report)}`);
-    if (data.report.verdict === "avoid") {
-      console.log(`    !! ABORTING interaction with "${entity}"`);
+      const data = (await served.json()) as { report: ThreatReport };
+      logResult(entity, amount, "cache", data.report);
+    } else if (res.status === 404) {
+      // Unknown entity: commission an on-demand investigation (pay-on-completion).
+      const inv = await fetch(`${base}/api/investigate?entity=${encodeURIComponent(entity)}`, {
+        headers: { "x-budget": user.address },
+      });
+      if (inv.status === 402) {
+        console.log(`  ${entity}: investigation budget spent`);
+        continue;
+      }
+      if (!inv.ok) {
+        console.log(`  ${entity}: investigation error ${inv.status}`);
+        continue;
+      }
+      const data = (await inv.json()) as { charged: string; report: ThreatReport };
+      logResult(entity, BigInt(data.charged), "investigation", data.report);
+    } else {
+      console.log(`  ${entity}: unexpected status ${res.status}`);
     }
   }
 
-  const after = await backend.allowanceStatus({
-    delegator: user.address,
-    delegatee: agent.address,
-    mint,
-  });
-  console.log(`\nDone. ${checks} checks, spent ${fmtToken(spent)}, remaining ${fmtToken(after.remaining)}.`);
+  const checkAfter = await backend.allowanceStatus({ delegator: user.address, delegatee: agent.address, mint });
+  const invAfter = await backend.allowanceStatus({ delegator: user.address, delegatee: merchant.address, mint });
+  console.log(
+    `\nRemaining -- checks: ${fmtToken(checkAfter.remaining)}, investigations: ${fmtToken(invAfter.remaining)}`,
+  );
 }
 
 main().catch((err) => {

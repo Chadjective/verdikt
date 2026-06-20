@@ -15,8 +15,12 @@ export const config = {
   /** SPL token mint (6 decimals) used for payments. */
   tokenMint: env("TOKEN_MINT", ""),
   port: Number(env("PORT", "4021")),
-  /** Price per threat-check, in token base units. */
+  /** Price per cached threat-check (cheap tier), in token base units. */
   pricePerCheck: BigInt(env("PRICE_PER_CHECK", "10000")),
+  /** Price per on-demand investigation (premium tier: covers compute), base units. */
+  pricePerInvestigation: BigInt(env("PRICE_PER_INVESTIGATION", "100000")),
+  /** Simulated investigation compute time (ms). */
+  investigationMs: Number(env("INVESTIGATION_MS", "800")),
   keypairs: {
     user: env("USER_KEYPAIR", ".keys/user.json"),
     agent: env("AGENT_KEYPAIR", ".keys/agent.json"),
