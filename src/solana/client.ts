@@ -9,7 +9,7 @@ import {
   type Address,
   type KeyPairSigner,
 } from "@solana/kit";
-import { solanaLocalRpc } from "@solana/kit-plugin-rpc";
+import { solanaDevnetRpc } from "@solana/kit-plugin-rpc";
 import { signer as signerPlugin } from "@solana/kit-plugin-signer";
 import { tokenProgram } from "@solana-program/token";
 import { subscriptionsProgram } from "@solana/subscriptions";
@@ -76,9 +76,11 @@ export async function createEphemeralWallet(): Promise<Wallet> {
  * or devnet.
  */
 export function buildClient(wallet: Wallet) {
+  // solanaDevnetRpc accepts a custom rpcUrl (default: public devnet). Point
+  // RPC_URL at a keyed RPC (e.g. Helius) to avoid public-devnet rate limits.
   return createClient()
     .use(signerPlugin(wallet.signer))
-    .use(solanaLocalRpc({ rpcUrl: config.rpcUrl }))
+    .use(solanaDevnetRpc({ rpcUrl: config.rpcUrl }))
     .use(tokenProgram())
     .use(subscriptionsProgram());
 }
