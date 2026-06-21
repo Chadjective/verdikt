@@ -78,7 +78,11 @@ async function main(): Promise<void> {
       const served = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`, {
         headers: { "x-payment": reference },
       });
-      const data = (await served.json()) as { report: ThreatReport; anchor?: AnchorInfo };
+      const data = (await served.json()) as { report?: ThreatReport; anchor?: AnchorInfo; error?: string };
+      if (!served.ok || !data.report) {
+        console.log(`  ${entity}: served ${served.status} ${data.error ?? ""}`.trim());
+        continue;
+      }
       logResult(entity, amount, "cache", data.report, data.anchor);
     } else if (res.status === 404) {
       // Unknown entity: commission an on-demand investigation (pay-on-completion).

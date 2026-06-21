@@ -140,18 +140,35 @@ curl "http://127.0.0.1:4021/api/check/subscription?entity=GhostBridge" \
 
 ## Run on real devnet (chain mode)
 
+No Solana CLI required. Public-devnet RPC airdrop is disabled, so fund the payer once at a faucet; everything else is pure-Node:
+
 ```bash
-npm run setup                 # airdrops devnet SOL; prints spl-token commands
-# create a plain-SPL 6-decimal token, fund the user (see setup output), then in .env:
-#   PAYMENTS=chain
-#   RPC_URL=https://api.devnet.solana.com
-#   TOKEN_MINT=<MINT>
-npm run allowance:grant && npm run plan:create && npm run plan:subscribe
-npm run server   # terminal 1
-npm run agent    # terminal 2
+# .env:  PAYMENTS=chain
+#        RPC_URL=https://api.devnet.solana.com   # or a keyed RPC (e.g. Helius) to dodge rate limits
+npm run setup            # generate keypairs (prints the payer address)
+# -> fund that address with ~2 devnet SOL at https://faucet.solana.com
+npm run setup:chain      # create mint + ATAs + distribute SOL; prints TOKEN_MINT -> add to .env
+npm run allowance:grant  # two delegations on-chain (user->agent, user->Avoid.net)
+npm run server           # terminal 1
+npm run agent            # terminal 2  (real transferFixed pulls + memo anchors)
+npm run test:chain       # integration test: asserts the on-chain cap decremented
 ```
 
-Same scripts, real program. **Plain SPL only** (the program's Token-2022 extension handling varies — see caveats).
+**Plain SPL only** (the program's Token-2022 extension handling varies — see caveats). The public devnet RPC rate-limits hard; a free keyed RPC makes the run reliable.
+
+## ✅ Verified live on devnet
+
+The full flow was executed against the **live** Subscriptions & Allowances program (`De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44`) on devnet — real `transferFixed` pulls and on-chain verdict anchors:
+
+| What | Solana Explorer (devnet) |
+|---|---|
+| Test mint (SPL, 6 dp) | [`56Zyc…kbzk`](https://explorer.solana.com/address/56ZycpXBSYe2j81Eq2pTXFmsuqTYPxmUUxdcKxQRkbzk?cluster=devnet) |
+| `transferFixed` allowance pull | [`3kPA5N…cXHf5`](https://explorer.solana.com/tx/3kPA5NFbACJaQLbYLdNbL9yWUD79MSpqBG91QPz2Q6Lw4knza1MJx66VFdR71RJYkPKPW8uQzm4xUmE5pNDcXHf5?cluster=devnet) |
+| Verdict anchor — Acme (clear) | [`5MWkUZ…t7zzH4`](https://explorer.solana.com/tx/5MWkUZUKQxTV9vvMC3PiewuBaPbHcLRKZwww2YVVphwRbydNbjrzf5Lbm1DY5AY99eNJRDvoJEVh3YXzptt7zzH4?cluster=devnet) |
+| Verdict anchor — DrainCoin (avoid) | [`5q4Cky…cvm3A`](https://explorer.solana.com/tx/5q4Ckye4tNPw6ZorxXFWNsyArd71zFoiaAebda6LL86Jz8dHfEdnfiK31idMQd956B2zCV944oWPGAWstgzcvm3A?cluster=devnet) |
+| Verdict anchor — NovaSwap (fresh investigation) | [`3GAPUY…XptLr`](https://explorer.solana.com/tx/3GAPUYpBEm6ubNqNZ3SkpqtBFjQjRT6eGTUHrmb71KmAi6zyzDmyPyeCGcWaDFWncCxWTybqMunt37iwBecXptLr?cluster=devnet) |
+
+`npm run test:chain` passes against devnet; `npm test` runs 37 unit tests. (Mint + keypairs are demo throwaways.)
 
 ---
 

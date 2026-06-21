@@ -40,6 +40,9 @@ export function extractSignature(r: unknown): string {
     for (const k of ["signature", "txSignature", "transactionSignature"]) {
       if (typeof o[k] === "string") return o[k] as string;
     }
+    // kit sendTransaction resolves to { context: { signature } }
+    const ctx = o.context as Record<string, unknown> | undefined;
+    if (ctx && typeof ctx.signature === "string") return ctx.signature;
   }
   return String(r);
 }
