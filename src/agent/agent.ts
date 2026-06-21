@@ -26,8 +26,16 @@ interface CheckQuote {
   payTo: string;
 }
 
-function logResult(entity: string, amount: bigint, tier: string, rep: ThreatReport): void {
+interface AnchorInfo {
+  reference: string;
+  explorerUrl?: string;
+}
+
+function logResult(entity: string, amount: bigint, tier: string, rep: ThreatReport, anchor?: AnchorInfo): void {
   console.log(`  paid ${fmtToken(amount)} [${tier}]  ${decisionLine(rep)}`);
+  if (anchor) {
+    console.log(`       anchored ${rep.contentHash.slice(0, 12)}.. -> ${anchor.explorerUrl ?? anchor.reference}`);
+  }
   if (rep.verdict === "avoid") console.log(`    !! ABORTING interaction with "${entity}"`);
 }
 
@@ -70,8 +78,8 @@ async function main(): Promise<void> {
       const served = await fetch(`${base}/api/check?entity=${encodeURIComponent(entity)}`, {
         headers: { "x-payment": reference },
       });
-      const data = (await served.json()) as { report: ThreatReport };
-      logResult(entity, amount, "cache", data.report);
+      const data = (await served.json()) as { report: ThreatReport; anchor?: AnchorInfo };
+      logResult(entity, amount, "cache", data.report, data.anchor);
     } else if (res.status === 404) {
       // Unknown entity: commission an on-demand investigation (pay-on-completion).
       const inv = await fetch(`${base}/api/investigate?entity=${encodeURIComponent(entity)}`, {
@@ -85,8 +93,8 @@ async function main(): Promise<void> {
         console.log(`  ${entity}: investigation error ${inv.status}`);
         continue;
       }
-      const data = (await inv.json()) as { charged: string; report: ThreatReport };
-      logResult(entity, BigInt(data.charged), "investigation", data.report);
+      const data = (await inv.json()) as { charged: string; report: ThreatReport; anchor?: AnchorInfo };
+      logResult(entity, BigInt(data.charged), "investigation", data.report, data.anchor);
     } else {
       console.log(`  ${entity}: unexpected status ${res.status}`);
     }

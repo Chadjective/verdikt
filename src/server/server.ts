@@ -2,7 +2,8 @@ import express from "express";
 import { activeMint, config, fmtToken, serverBaseUrl, TOKEN_DECIMALS } from "../config";
 import { createPaymentBackend } from "../payments";
 import { loadWallet } from "../solana/client";
-import { investigate, lookup } from "../avoid/threatApi";
+import { investigate, lookup, type ThreatReport } from "../avoid/threatApi";
+import { createAnchor } from "../anchor";
 
 /**
  * Avoid.net metered threat API. Two settlement models on one allowance rail:
@@ -29,6 +30,16 @@ async function main(): Promise<void> {
   const merchantAta = await backend.ataFor(merchant.address, mint);
   const checkPrice = config.pricePerCheck;
   const investigationPrice = config.pricePerInvestigation;
+  const anchor = createAnchor();
+
+  // Anchor the verdict's content hash (best-effort); returns the receipt or undefined.
+  const anchorOf = async (report: ThreatReport) => {
+    try {
+      return await anchor.anchor(report.contentHash);
+    } catch {
+      return undefined;
+    }
+  };
 
   const app = express();
   app.use(express.json());
@@ -85,7 +96,7 @@ async function main(): Promise<void> {
       res.status(402).json({ error: "invalid or already-used payment", scheme: "solana-allowance" });
       return;
     }
-    res.json({ paid: true, tier: "cache", reference: proof, report: hit });
+    res.json({ paid: true, tier: "cache", reference: proof, report: hit, anchor: await anchorOf(hit) });
   });
 
   // --- On-demand investigation: pay-on-completion, Avoid.net is the delegatee ---
@@ -143,6 +154,7 @@ async function main(): Promise<void> {
         charged: investigationPrice.toString(),
         reference: proof.reference,
         report,
+        anchor: await anchorOf(report),
       });
     } catch (err) {
       res.status(402).json({ error: `payment failed after investigation: ${(err as Error).message}` });
@@ -173,7 +185,7 @@ async function main(): Promise<void> {
       return;
     }
     const report = lookup(entity) ?? (await investigate(entity, config.investigationMs));
-    res.json({ subscriber, tier: "subscription", report });
+    res.json({ subscriber, tier: "subscription", report, anchor: await anchorOf(report) });
   });
 
   app.listen(config.port, () => {

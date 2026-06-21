@@ -1,27 +1,24 @@
 /**
  * Avoid.net - threat-intelligence core (demo stub).
  *
- * In production this is a PAID HTTP API backed by the Avoid.net Gen-2 pipeline
- * (Scanner -> Analyst -> Verifier -> Reporter, with Critic + Orchestrator) and a
- * deterministic trust score S = f(severity, evidence, sources, critique), with
- * content hashes anchored on Solana.
+ * Every verdict carries (1) a deterministic `contentHash` over the assessment,
+ * so it can be anchored on-chain and later verified, and (2) a verdict-aware
+ * freshness window (`ttlSeconds`/`expiresAt`/`freshness`) computed at read time
+ * -- because a "clear" verdict decays fast (clean now != clean later) while a
+ * confirmed scam stays bad for a long time.
  *
- * Two operations, two price tiers:
- *   - lookup()     : cheap, instant cache hit for already-investigated entities.
- *   - investigate(): premium, on-demand fresh investigation (simulated compute)
- *                    for unknowns. In production this enqueues a high-priority
- *                    `investigation_request` for the `avoid-investigator` agent.
- *
- * This module is free of any Solana / payment code -- it is the "product" being
- * metered, and the piece you lift into the real Avoid.net API. All entities are
- * SYNTHETIC for illustration.
+ * This module is free of Solana / payment code -- it's the "product" being
+ * metered. On-chain anchoring of the hash is done by the Anchor backend, in the
+ * server. All entities below are SYNTHETIC for illustration.
  */
+
+import { createHash } from "node:crypto";
 
 export type Severity = "critical" | "high" | "medium" | "low" | "none";
 export type Verdict = "avoid" | "caution" | "clear" | "unknown";
+export type Freshness = "fresh" | "aging" | "stale";
 
 export interface ThreatSource {
-  /** Avoid.net data source, e.g. "ZachXBT", "SEAL", "Forta", "ScamSniffer". */
   name: string;
   url?: string;
   note: string;
@@ -36,12 +33,19 @@ export interface ThreatReport {
   summary: string;
   reasons: string[];
   sources: ThreatSource[];
+  /** When the assessment was produced (ISO). */
   checkedAt: string;
+  /** Validity window for this verdict, in seconds (verdict-dependent). */
+  ttlSeconds: number;
+  /** ISO time after which the verdict should be treated as stale. */
+  expiresAt: string;
+  /** Freshness at READ time: fresh | aging | stale. */
+  freshness: Freshness;
+  /** Deterministic hash of the assessment content (for on-chain anchoring). */
+  contentHash: string;
   /** True when produced by an on-demand investigation (not a cache hit). */
   fresh?: boolean;
-  /** Compute time spent on the investigation (ms). */
   investigationMs?: number;
-  /** True when the investigation jumped the queue (paid priority). */
   priority?: boolean;
 }
 
@@ -55,7 +59,7 @@ interface IntelRecord {
   sources: ThreatSource[];
 }
 
-/** Seed intel set (synthetic). Mirrors real Avoid.net investigations. */
+/** Seed intel set (synthetic). */
 const INTEL: IntelRecord[] = [
   {
     name: "DrainCoin (DRAIN)",
@@ -114,26 +118,6 @@ const INTEL: IntelRecord[] = [
   },
 ];
 
-function recordToReport(rec: IntelRecord, query: string): ThreatReport {
-  return {
-    query,
-    matched: true,
-    verdict: verdictFromScore(rec.trustScore),
-    trustScore: rec.trustScore,
-    severity: rec.severity,
-    summary: rec.summary,
-    reasons: rec.reasons,
-    sources: rec.sources,
-    checkedAt: new Date().toISOString(),
-  };
-}
-
-/** Cache of investigated entities (seeded from INTEL, grows with investigate()). */
-const cache = new Map<string, ThreatReport>();
-for (const rec of INTEL) {
-  for (const key of rec.keys) cache.set(key.toLowerCase(), recordToReport(rec, rec.name));
-}
-
 /** Map a deterministic trust score to an actionable verdict (Avoid.net thresholds). */
 export function verdictFromScore(score: number): Verdict {
   if (score >= 75) return "clear";
@@ -141,9 +125,103 @@ export function verdictFromScore(score: number): Verdict {
   return "avoid";
 }
 
-/** Cache hit for an already-investigated entity, or null if unknown. */
+/**
+ * Verdict validity windows. A confirmed scam stays a scam for a long time; a
+ * "clear" verdict decays fast because clean-now does not mean clean-later.
+ */
+export function ttlForVerdict(verdict: Verdict): number {
+  switch (verdict) {
+    case "avoid":
+      return 30 * 24 * 3600; // 30 days
+    case "caution":
+      return 12 * 3600; // 12 hours
+    case "clear":
+      return 6 * 3600; // 6 hours
+    default:
+      return 3600; // unknown: 1 hour
+  }
+}
+
+interface HashFields {
+  entity: string;
+  verdict: Verdict;
+  trustScore: number;
+  severity: Severity;
+  summary: string;
+  reasons: string[];
+  sources: ThreatSource[];
+}
+
+/** Deterministic sha256 over the assessment content (stable key order). */
+export function contentHashOf(f: HashFields): string {
+  const canonical = JSON.stringify({
+    entity: f.entity.trim().toLowerCase(),
+    verdict: f.verdict,
+    trustScore: f.trustScore,
+    severity: f.severity,
+    summary: f.summary,
+    reasons: f.reasons,
+    sources: f.sources,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function freshnessFor(checkedAtMs: number, ttlSeconds: number, nowMs: number): Freshness {
+  const ageSeconds = (nowMs - checkedAtMs) / 1000;
+  if (ageSeconds >= ttlSeconds) return "stale";
+  if (ageSeconds >= ttlSeconds * 0.5) return "aging";
+  return "fresh";
+}
+
+/** The cached assessment, minus the read-time freshness/expiry fields. */
+type VerdictBase = Omit<ThreatReport, "freshness" | "expiresAt">;
+
+const cache = new Map<string, VerdictBase>();
+
+function baseFromRecord(rec: IntelRecord, query: string, checkedAt: string): VerdictBase {
+  const verdict = verdictFromScore(rec.trustScore);
+  return {
+    query,
+    matched: true,
+    verdict,
+    trustScore: rec.trustScore,
+    severity: rec.severity,
+    summary: rec.summary,
+    reasons: rec.reasons,
+    sources: rec.sources,
+    checkedAt,
+    ttlSeconds: ttlForVerdict(verdict),
+    contentHash: contentHashOf({
+      entity: query,
+      verdict,
+      trustScore: rec.trustScore,
+      severity: rec.severity,
+      summary: rec.summary,
+      reasons: rec.reasons,
+      sources: rec.sources,
+    }),
+  };
+}
+
+const SEED_TIME = new Date().toISOString();
+for (const rec of INTEL) {
+  for (const key of rec.keys) cache.set(key.toLowerCase(), baseFromRecord(rec, rec.name, SEED_TIME));
+}
+
+/** Attach read-time freshness + expiry to a cached base assessment. */
+function finalize(base: VerdictBase, nowMs: number = Date.now()): ThreatReport {
+  const checkedAtMs = Date.parse(base.checkedAt);
+  return {
+    ...base,
+    expiresAt: new Date(checkedAtMs + base.ttlSeconds * 1000).toISOString(),
+    freshness: freshnessFor(checkedAtMs, base.ttlSeconds, nowMs),
+  };
+}
+
+/** Cache hit for an already-investigated entity (freshness computed now), or null. */
 export function lookup(query: string): ThreatReport | null {
-  return cache.get(query.trim().toLowerCase()) ?? null;
+  const base = cache.get(query.trim().toLowerCase());
+  return base ? finalize(base) : null;
 }
 
 function fnv1a(s: string): number {
@@ -208,59 +286,69 @@ function synthDetails(verdict: Verdict): { summary: string; reasons: string[]; s
   };
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
 /**
- * Run an on-demand investigation for an unknown entity. Simulates the compute
- * cost of a pipeline run, synthesizes a deterministic verdict, caches it (so
- * the next lookup is the cheap tier), and returns it marked `fresh`.
+ * Run an on-demand investigation for an unknown entity. Simulates compute,
+ * synthesizes a deterministic verdict, stamps it with a verdict-aware TTL +
+ * content hash, caches it, and returns it marked `fresh`.
  */
 export async function investigate(query: string, computeMs = 800): Promise<ThreatReport> {
-  await new Promise((resolve) => setTimeout(resolve, Math.max(0, computeMs)));
+  await sleep(computeMs);
   const key = query.trim().toLowerCase();
   const score = fnv1a(key) % 101;
   const verdict = verdictFromScore(score);
+  const severity = severityFromScore(score);
   const { summary, reasons, sources } = synthDetails(verdict);
-  const report: ThreatReport = {
+  const base: VerdictBase = {
     query,
     matched: true,
     verdict,
     trustScore: score,
-    severity: severityFromScore(score),
+    severity,
     summary,
     reasons,
     sources,
     checkedAt: new Date().toISOString(),
+    ttlSeconds: ttlForVerdict(verdict),
+    contentHash: contentHashOf({ entity: query, verdict, trustScore: score, severity, summary, reasons, sources }),
     fresh: true,
     investigationMs: computeMs,
     priority: true,
   };
-  cache.set(key, report);
-  return report;
+  cache.set(key, base);
+  return finalize(base);
 }
 
-/**
- * Cache lookup with an "unknown" placeholder fallback (no investigation).
- * Used by routes that only serve already-known intel.
- */
+/** Cache lookup with an "unknown" placeholder fallback (no investigation). */
 export function checkEntity(query: string): ThreatReport {
   const hit = lookup(query);
   if (hit) return hit;
-  return {
+  const verdict: Verdict = "unknown";
+  const summary =
+    "No intelligence on this entity yet. Commission an on-demand investigation to get a verdict.";
+  const reasons = ["Not present in the threat-intelligence cache"];
+  const sources: ThreatSource[] = [];
+  const base: VerdictBase = {
     query,
     matched: false,
-    verdict: "unknown",
+    verdict,
     trustScore: 50,
     severity: "low",
-    summary:
-      "No intelligence on this entity yet. Commission an on-demand investigation to get a verdict.",
-    reasons: ["Not present in the threat-intelligence cache"],
-    sources: [],
+    summary,
+    reasons,
+    sources,
     checkedAt: new Date().toISOString(),
+    ttlSeconds: ttlForVerdict(verdict),
+    contentHash: contentHashOf({ entity: query, verdict, trustScore: 50, severity: "low", summary, reasons, sources }),
   };
+  return finalize(base);
 }
 
 /** Short one-line decision an agent can log/act on. */
 export function decisionLine(report: ThreatReport): string {
   const tag = report.verdict.toUpperCase();
   const fresh = report.fresh ? " (fresh)" : "";
-  return `[${tag}]${fresh} ${report.query} - trust ${report.trustScore}/100 (${report.severity}) - ${report.summary}`;
+  const stale = report.freshness === "stale" ? " [STALE]" : "";
+  return `[${tag}]${fresh}${stale} ${report.query} - trust ${report.trustScore}/100 (${report.severity}) - ${report.summary}`;
 }

@@ -22,6 +22,7 @@
     "agent": "tsx src/agent/agent.ts"
   },
   "dependencies": {
+    "@solana-program/memo": "^0.11.2",
     "@solana-program/system": "^0.12.2",
     "@solana-program/token": "^0.13.0",
     "@solana/kit": "^6.4.0",
