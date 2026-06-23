@@ -114,6 +114,63 @@ describe("MockPayments — two concurrent delegations off one account", () => {
   });
 });
 
+describe("MockPayments — recurring delegation", () => {
+  const grant = (m: MockPayments, amountPerPeriod: bigint, periodLengthS: bigint) => {
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    return m.grantRecurringAllowance({
+      delegator: USER,
+      delegatee: AGENT.address,
+      mint: MINT,
+      amountPerPeriod,
+      periodLengthS,
+      startUnix: now,
+      expiryUnix: now + 3600n,
+    });
+  };
+
+  it("grants and reports a per-period budget", async () => {
+    const m = new MockPayments();
+    await grant(m, 30n, 60n);
+    const s = await m.recurringStatus({ delegator: USER.address, delegatee: AGENT.address, mint: MINT });
+    expect(s.exists).toBe(true);
+    expect(s.remaining).toBe(30n);
+  });
+
+  it("decrements within a period and enforces the per-period cap", async () => {
+    const m = new MockPayments();
+    await grant(m, 30n, 60n);
+    const ata = await m.ataFor(MERCHANT.address, MINT);
+    await m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 10n });
+    await m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 20n });
+    expect((await m.recurringStatus({ delegator: USER.address, delegatee: AGENT.address, mint: MINT })).remaining).toBe(0n);
+    // The next pull this period exceeds the cap.
+    await expect(
+      m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 1n }),
+    ).rejects.toThrow(/per-period cap/i);
+  });
+
+  it("refills the cap when a new period begins", async () => {
+    const m = new MockPayments();
+    await grant(m, 30n, 1n); // 1-second period
+    const ata = await m.ataFor(MERCHANT.address, MINT);
+    await m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 30n });
+    await expect(
+      m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 1n }),
+    ).rejects.toThrow(/per-period cap/i);
+    await new Promise((r) => setTimeout(r, 1300)); // cross the period boundary
+    const proof = await m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 30n });
+    expect(proof.amount).toBe(30n);
+  });
+
+  it("yields a proof verifiable through the existing verifyPayment path", async () => {
+    const m = new MockPayments();
+    await grant(m, 30n, 60n);
+    const ata = await m.ataFor(MERCHANT.address, MINT);
+    const proof = await m.payPerPeriod({ delegatee: AGENT, delegator: USER.address, mint: MINT, merchantAta: ata, amount: 10n });
+    expect(await m.verifyPayment({ proof: proof.reference, minAmount: 10n, merchantAta: ata, mint: MINT })).toBe(true);
+  });
+});
+
 describe("MockPayments — subscription flow", () => {
   const plan = { merchant: MERCHANT, planId: 1n, mint: MINT, amount: 500n, periodHours: 720n, destinations: ["x"], pullers: ["y"], metadataUri: "u" };
 

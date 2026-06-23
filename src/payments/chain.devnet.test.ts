@@ -46,4 +46,46 @@ describe.skipIf(!RUN)("ChainPayments — devnet integration", () => {
     },
     180_000,
   );
+
+  it(
+    "decrements the recurring per-period cap by the pulled amount, on-chain",
+    async () => {
+      const chain = new ChainPayments();
+      const user = await loadWallet(config.keypairs.user);
+      const agent = await loadWallet(config.keypairs.agent);
+      const merchant = await loadWallet(config.keypairs.merchant);
+      const mint = config.tokenMint;
+
+      const cap = 50_000n;
+      const pull = 10_000n;
+      const nonce = BigInt(Date.now()); // unique recurring delegation PDA per run
+      const now = Math.floor(Date.now() / 1000);
+      const startUnix = BigInt(now + 10); // future start dodges START_TIME_IN_PAST on confirm latency
+      const expiryUnix = BigInt(now + 7200);
+
+      await chain.grantRecurringAllowance({
+        delegator: user,
+        delegatee: agent.address,
+        mint,
+        amountPerPeriod: cap,
+        periodLengthS: 3600n,
+        startUnix,
+        expiryUnix,
+        nonce,
+      });
+
+      const before = await chain.recurringStatus({ delegator: user.address, delegatee: agent.address, mint, nonce });
+      expect(before.exists).toBe(true);
+      expect(before.remaining).toBe(cap);
+
+      await new Promise((r) => setTimeout(r, 13_000)); // wait past the start time
+
+      const merchantAta = await chain.ataFor(merchant.address, mint);
+      await chain.payPerPeriod({ delegatee: agent, delegator: user.address, mint, merchantAta, amount: pull, nonce });
+
+      const after = await chain.recurringStatus({ delegator: user.address, delegatee: agent.address, mint, nonce });
+      expect(after.remaining).toBe(cap - pull);
+    },
+    180_000,
+  );
 });

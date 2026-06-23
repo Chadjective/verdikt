@@ -6,6 +6,7 @@ import type {
   ChargeSubscriptionArgs,
   CreatePlanArgs,
   GrantAllowanceArgs,
+  GrantRecurringAllowanceArgs,
   IsSubscriptionActiveArgs,
   PaymentBackend,
   PaymentProof,
@@ -28,6 +29,16 @@ interface AllowanceRow {
   remaining: string;
   expiresUnix: string;
 }
+interface RecurringRow {
+  amountPerPeriod: string;
+  periodLengthS: string;
+  startUnix: string;
+  expiryUnix: string;
+  /** Start of the period the row was last accounted against. */
+  currentPeriodStartUnix: string;
+  /** Amount already pulled in the current period (resets each period). */
+  pulledInPeriod: string;
+}
 interface ProofRow {
   amount: string;
   merchantAta: string;
@@ -49,6 +60,7 @@ interface SubRow {
 }
 interface Ledger {
   allowances: Record<string, AllowanceRow>;
+  recurring: Record<string, RecurringRow>;
   proofs: Record<string, ProofRow>;
   plans: Record<string, PlanRow>;
   subscriptions: Record<string, SubRow>;
@@ -56,7 +68,7 @@ interface Ledger {
 }
 
 function emptyLedger(): Ledger {
-  return { allowances: {}, proofs: {}, plans: {}, subscriptions: {}, counter: 0 };
+  return { allowances: {}, recurring: {}, proofs: {}, plans: {}, subscriptions: {}, counter: 0 };
 }
 
 async function load(): Promise<Ledger> {
@@ -76,6 +88,12 @@ async function save(l: Ledger): Promise<void> {
 
 function nowUnix(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
+}
+
+/** Start of the period containing `now`, given a delegation that began at `start`. */
+function periodStartFor(start: bigint, period: bigint, now: bigint): bigint {
+  if (period <= 0n || now <= start) return start;
+  return start + ((now - start) / period) * period;
 }
 
 const aKey = (delegator: string, delegatee: string, mint: string, nonce: bigint) =>
@@ -138,6 +156,70 @@ export class MockPayments implements PaymentBackend {
     p.used = true; // replay protection
     await save(l);
     return true;
+  }
+
+  // --- Recurring delegation: a per-period budget that refills each period.
+  // Mirrors the on-chain RecurringDelegation account (amountPerPeriod, period,
+  // amountPulledInPeriod resetting each period).
+
+  async grantRecurringAllowance(a: GrantRecurringAllowanceArgs): Promise<void> {
+    const l = await load();
+    l.recurring[aKey(a.delegator.address, a.delegatee, a.mint, a.nonce ?? 0n)] = {
+      amountPerPeriod: a.amountPerPeriod.toString(),
+      periodLengthS: a.periodLengthS.toString(),
+      startUnix: a.startUnix.toString(),
+      expiryUnix: a.expiryUnix.toString(),
+      currentPeriodStartUnix: a.startUnix.toString(),
+      pulledInPeriod: "0",
+    };
+    await save(l);
+  }
+
+  async payPerPeriod(a: PayPerCallArgs): Promise<PaymentProof> {
+    const l = await load();
+    const key = aKey(a.delegator, a.delegatee.address, a.mint, a.nonce ?? 0n);
+    const row = l.recurring[key];
+    if (!row) throw new Error("No recurring allowance for this agent. Run `npm run recurring:grant`.");
+    const now = nowUnix();
+    const expiry = BigInt(row.expiryUnix);
+    if (expiry !== 0n && now > expiry) throw new Error("Recurring allowance expired.");
+    const start = BigInt(row.startUnix);
+    if (now < start) throw new Error("Recurring allowance has not started yet.");
+    const period = BigInt(row.periodLengthS);
+    const perPeriod = BigInt(row.amountPerPeriod);
+    // Roll the period forward if we've crossed a boundary (the on-chain reset).
+    const curStart = periodStartFor(start, period, now);
+    if (curStart > BigInt(row.currentPeriodStartUnix)) {
+      row.currentPeriodStartUnix = curStart.toString();
+      row.pulledInPeriod = "0";
+    }
+    const pulled = BigInt(row.pulledInPeriod);
+    if (pulled + a.amount > perPeriod) {
+      throw new Error(`Per-period cap exceeded: ${pulled + a.amount} > ${perPeriod} this period.`);
+    }
+    row.pulledInPeriod = (pulled + a.amount).toString();
+    const reference = `mock-rec-${++l.counter}`;
+    l.proofs[reference] = {
+      amount: a.amount.toString(),
+      merchantAta: a.merchantAta,
+      mint: a.mint,
+      used: false,
+    };
+    await save(l);
+    return { reference, amount: a.amount };
+  }
+
+  async recurringStatus(a: AllowanceStatusArgs): Promise<AllowanceStatus> {
+    const l = await load();
+    const row = l.recurring[aKey(a.delegator, a.delegatee, a.mint, a.nonce ?? 0n)];
+    if (!row) return { exists: false, remaining: 0n, expiresUnix: 0n };
+    const now = nowUnix();
+    const start = BigInt(row.startUnix);
+    const period = BigInt(row.periodLengthS);
+    const perPeriod = BigInt(row.amountPerPeriod);
+    const periodRolled = periodStartFor(start, period, now) > BigInt(row.currentPeriodStartUnix);
+    const remaining = periodRolled ? perPeriod : perPeriod - BigInt(row.pulledInPeriod);
+    return { exists: true, remaining, expiresUnix: BigInt(row.expiryUnix) };
   }
 
   async createPlan(a: CreatePlanArgs): Promise<void> {

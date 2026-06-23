@@ -26,6 +26,16 @@ The unknown-entity case is the interesting one. Instead of a dead-end "no data,"
 
 The agent run uses **two live delegations off a single token account** — `user → agent` (cheap checks) and `user → Avoid.net` (investigations), each with its own cap, enforced independently. Raw SPL `approve` allows **one** delegate per token account; this is precisely the limit Subscriptions & Allowances removes.
 
+### All three S&A constructs are exercised
+
+Subscriptions & Allowances ships three delegation constructs — Verdikt uses **all three**:
+
+- **Fixed delegation** (`createFixedDelegation` / `transferFixed`) — the agent's check + investigation budgets in the run above (one-shot caps).
+- **Recurring delegation** (`createRecurringDelegation` / `transferRecurring`) — a budget that **refills every period**, the natural fit for a long-running agent's recurring spend. Demonstrated standalone in [`npm run recurring:demo`](#quickstart-mock-mode--no-validator).
+- **Subscription plan** (`createPlan` / `subscribe` / `transferSubscription`) — the human/team API tier.
+
+Raw SPL `approve` gives you one delegate with no expiry and no refill — this primitive gives all three.
+
 ---
 
 ## What it looks like (real output, mock mode)
@@ -92,7 +102,7 @@ src/
   solana/client.ts       # @solana/kit client, keypair gen/load, plugins
   server/server.ts       # /api/check (pre-pay) · /api/investigate (pay-on-completion) · /api/check/subscription
   agent/agent.ts         # autonomous agent using both budgets
-  scripts/               # setup, grant-allowance (2 delegations), create-plan, subscribe, charge-subscription
+  scripts/               # setup, grant-allowance (2 delegations), grant-recurring, recurring-demo, devnet-recurring, create-plan, subscribe, charge-subscription
 ```
 
 ### Demo operation → on-chain instruction (`@solana/subscriptions`)
@@ -100,9 +110,11 @@ src/
 | Operation | Instruction(s) |
 |---|---|
 | grant allowance (×2 delegatees) | `initSubscriptionAuthority` (once) + `createFixedDelegation` ×2 |
+| grant recurring allowance (refilling per-period budget) | `initSubscriptionAuthority` (once) + `createRecurringDelegation` |
 | pay per cached check (agent) | `transferFixed` (signed by agent) |
+| pay per period from a recurring budget (agent) | `transferRecurring` (signed by agent) |
 | investigate, pay-on-completion (Avoid.net) | `transferFixed` (signed by merchant, after the work) |
-| read remaining budget | `fetchMaybeFixedDelegation` |
+| read remaining budget | `fetchMaybeFixedDelegation` / `fetchMaybeRecurringDelegation` |
 | create plan / subscribe / charge | `createPlan` / `subscribe` / `transferSubscription` |
 
 Program: **`De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44`** (devnet + mainnet-beta; live since 2026-06-02, by Moonsong Labs + Solana Foundation; audited Cantina/Spearbit).
@@ -134,7 +146,13 @@ curl "http://127.0.0.1:4021/api/check/subscription?entity=GhostBridge" \
      -H "x-subscriber: <USER_ADDRESS_FROM_SETUP>"
 ```
 
-`npm run typecheck` validates every SDK call against the published types; `npm test` runs the unit suite (31 tests).
+**Recurring delegation** (the third primitive, standalone — no server needed):
+
+```bash
+npm run recurring:demo        # a per-period budget: spend it, get refused at the cap, watch it refill
+```
+
+`npm run typecheck` validates every SDK call against the published types; `npm test` runs the unit suite (41 tests).
 
 ---
 
@@ -151,24 +169,27 @@ npm run setup:chain      # create mint + ATAs + distribute SOL; prints TOKEN_MIN
 npm run allowance:grant  # two delegations on-chain (user->agent, user->Avoid.net)
 npm run server           # terminal 1
 npm run agent            # terminal 2  (real transferFixed pulls + memo anchors)
-npm run test:chain       # integration test: asserts the on-chain cap decremented
+npm run devnet:recurring # one-shot recurring-delegation proof (create + pull + read-back)
+npm run test:chain       # integration tests: assert the fixed + recurring caps decremented on-chain
 ```
 
 **Plain SPL only** (the program's Token-2022 extension handling varies — see caveats). The public devnet RPC rate-limits hard; a free keyed RPC makes the run reliable.
 
 ## ✅ Verified live on devnet
 
-The full flow was executed against the **live** Subscriptions & Allowances program (`De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44`) on devnet — real `transferFixed` pulls and on-chain verdict anchors:
+The full flow was executed against the **live** Subscriptions & Allowances program (`De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44`) on devnet — real `transferFixed` + `transferRecurring` pulls and on-chain verdict anchors:
 
 | What | Solana Explorer (devnet) |
 |---|---|
 | Test mint (SPL, 6 dp) | [`56Zyc…kbzk`](https://explorer.solana.com/address/56ZycpXBSYe2j81Eq2pTXFmsuqTYPxmUUxdcKxQRkbzk?cluster=devnet) |
 | `transferFixed` allowance pull | [`3kPA5N…cXHf5`](https://explorer.solana.com/tx/3kPA5NFbACJaQLbYLdNbL9yWUD79MSpqBG91QPz2Q6Lw4knza1MJx66VFdR71RJYkPKPW8uQzm4xUmE5pNDcXHf5?cluster=devnet) |
+| `createRecurringDelegation` (recurring budget) | [`46fZhr…2T4q94`](https://explorer.solana.com/tx/46fZhrZU5dXbbWLSrgpLqo2Jfe19FEvv5MFv8iod9kGT1Yib7FopnFGcN8KQoLCb5sNmXMeiKkhAHJwBZC2T4q94?cluster=devnet) |
+| `transferRecurring` per-period pull | [`5A2azY…RRu3XF`](https://explorer.solana.com/tx/5A2azY6iw7CDkdcyZgFnmqWFK3RghnFXq5y7oeuGvRK4Po2CqNSDvVZgk7AatsbZAJEda2jY7jiNAWQWN8RRu3XF?cluster=devnet) |
 | Verdict anchor — Acme (clear) | [`5MWkUZ…t7zzH4`](https://explorer.solana.com/tx/5MWkUZUKQxTV9vvMC3PiewuBaPbHcLRKZwww2YVVphwRbydNbjrzf5Lbm1DY5AY99eNJRDvoJEVh3YXzptt7zzH4?cluster=devnet) |
 | Verdict anchor — DrainCoin (avoid) | [`5q4Cky…cvm3A`](https://explorer.solana.com/tx/5q4Ckye4tNPw6ZorxXFWNsyArd71zFoiaAebda6LL86Jz8dHfEdnfiK31idMQd956B2zCV944oWPGAWstgzcvm3A?cluster=devnet) |
 | Verdict anchor — NovaSwap (fresh investigation) | [`3GAPUY…XptLr`](https://explorer.solana.com/tx/3GAPUYpBEm6ubNqNZ3SkpqtBFjQjRT6eGTUHrmb71KmAi6zyzDmyPyeCGcWaDFWncCxWTybqMunt37iwBecXptLr?cluster=devnet) |
 
-`npm run test:chain` passes against devnet; `npm test` runs 37 unit tests. (Mint + keypairs are demo throwaways.)
+`npm run test:chain` passes against devnet (fixed **and** recurring delegations); `npm test` runs 41 unit tests. (Mint + keypairs are demo throwaways.)
 
 ---
 
@@ -182,6 +203,7 @@ The full flow was executed against the **live** Subscriptions & Allowances progr
 ## Accuracy & caveats
 
 - `@solana/subscriptions@0.3.0` is **pre-1.0**; versions pinned. Whole repo typechecks against the published types.
+- The **recurring-delegation** path (`createRecurringDelegation` / `transferRecurring`) is implemented, typechecks against the SDK, exercised in mock (`recurring:demo` + unit tests), and **verified live on devnet** (`npm run devnet:recurring`; proofs in the table above; covered by `npm run test:chain`).
 - Threat data in [`threatApi.ts`](src/avoid/threatApi.ts) is **synthetic**; `investigate()` synthesizes a deterministic verdict to simulate compute. Swap this module for the live Avoid.net pipeline to ship.
 - x402 framing is our own composition — Solana's docs pair allowances with [x402](https://solana.com/x402) but ship no canonical 402-gate code.
 - "Live on mainnet" per the Solana Foundation announcement; this demo targets devnet.

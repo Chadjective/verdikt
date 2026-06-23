@@ -26,6 +26,23 @@ export interface GrantAllowanceArgs {
   nonce?: bigint;
 }
 
+export interface GrantRecurringAllowanceArgs {
+  /** Budget owner (user) who authorizes the delegatee to pull. */
+  delegator: Wallet;
+  /** Address permitted to pull (e.g. the agent). */
+  delegatee: string;
+  mint: string;
+  /** Cap that refills every period, in token base units. */
+  amountPerPeriod: bigint;
+  /** Period length in seconds (e.g. 86_400n = 1 day). */
+  periodLengthS: bigint;
+  /** When the budget activates (Unix seconds); must be >= now on-chain. */
+  startUnix: bigint;
+  /** Unix seconds; must be > startUnix on-chain. */
+  expiryUnix: bigint;
+  nonce?: bigint;
+}
+
 export interface AllowanceStatusArgs {
   delegator: string;
   delegatee: string;
@@ -100,11 +117,16 @@ export interface PaymentBackend {
   /** Resolve the token account (ATA) that receives funds for `owner` + `mint`. */
   ataFor(owner: string, mint: string): Promise<string>;
 
-  // --- Agent allowance (pay-per-call) flow ---
+  // --- Agent allowance (pay-per-call) flow, via a fixed delegation ---
   grantAllowance(args: GrantAllowanceArgs): Promise<void>;
   allowanceStatus(args: AllowanceStatusArgs): Promise<AllowanceStatus>;
   payPerCall(args: PayPerCallArgs): Promise<PaymentProof>;
   verifyPayment(args: VerifyPaymentArgs): Promise<boolean>;
+
+  // --- Recurring delegation (per-period refilling allowance) ---
+  grantRecurringAllowance(args: GrantRecurringAllowanceArgs): Promise<void>;
+  payPerPeriod(args: PayPerCallArgs): Promise<PaymentProof>;
+  recurringStatus(args: AllowanceStatusArgs): Promise<AllowanceStatus>;
 
   // --- Subscription plan (recurring) flow ---
   createPlan(args: CreatePlanArgs): Promise<void>;

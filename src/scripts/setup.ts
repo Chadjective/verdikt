@@ -28,7 +28,8 @@ async function main(): Promise<void> {
       /* no ledger yet */
     }
     console.log("\nMock mode ready (fresh ledger). Next:");
-    console.log("  npm run allowance:grant   # fund the agent's budget");
+    console.log("  npm run allowance:grant   # fund the agent's budget (fixed delegation)");
+    console.log("  npm run recurring:demo    # per-period refilling budget (recurring delegation)");
     console.log("  npm run plan:create       # publish a subscription plan");
     console.log("  npm run server            # in a separate terminal");
     console.log("  npm run agent             # watch the agent pay per check");

@@ -1,9 +1,11 @@
 import { type Signature } from "@solana/kit";
 import {
   fetchMaybeFixedDelegation,
+  fetchMaybeRecurringDelegation,
   fetchMaybeSubscriptionDelegation,
   findFixedDelegationPda,
   findPlanPda,
+  findRecurringDelegationPda,
   findSubscriptionAuthorityPda,
   findSubscriptionDelegationPda,
 } from "@solana/subscriptions";
@@ -20,6 +22,7 @@ import type {
   ChargeSubscriptionArgs,
   CreatePlanArgs,
   GrantAllowanceArgs,
+  GrantRecurringAllowanceArgs,
   IsSubscriptionActiveArgs,
   PaymentBackend,
   PaymentProof,
@@ -173,6 +176,101 @@ export class ChainPayments implements PaymentBackend {
     void a.mint;
     this.usedRefs.add(a.proof);
     return true;
+  }
+
+  // --- Recurring delegation: a per-period budget that refills each period.
+  // The third S&A construct alongside fixed delegations and subscription plans.
+
+  async grantRecurringAllowance(a: GrantRecurringAllowanceArgs): Promise<void> {
+    const client = buildClient(a.delegator);
+    const mint = toAddress(a.mint);
+    // Same per-(user, mint) SubscriptionAuthority as fixed delegations -- init once.
+    const init = await client.subscriptions.queries.isSubscriptionAuthorityInitialized(
+      a.delegator.signer.address,
+      mint,
+    );
+    if (!init.initialized) {
+      const userAta = await this.ataFor(a.delegator.address, a.mint);
+      await client.subscriptions.instructions
+        .initSubscriptionAuthority({
+          owner: a.delegator.signer,
+          tokenMint: mint,
+          tokenProgram: TOKEN_PROGRAM_ADDRESS,
+          userAta: toAddress(userAta),
+        })
+        .sendTransaction();
+    }
+    // startTs must be >= the on-chain clock and < expiryTs, else the program
+    // rejects (START_TIME_IN_PAST / START_TIME_GREATER_THAN_EXPIRY).
+    await client.subscriptions.instructions
+      .createRecurringDelegation({
+        amountPerPeriod: a.amountPerPeriod,
+        delegatee: toAddress(a.delegatee),
+        delegator: a.delegator.signer,
+        expiryTs: a.expiryUnix,
+        nonce: a.nonce ?? 0n,
+        periodLengthS: a.periodLengthS,
+        startTs: a.startUnix,
+        tokenMint: mint,
+      })
+      .sendTransaction();
+  }
+
+  async payPerPeriod(a: PayPerCallArgs): Promise<PaymentProof> {
+    const client = buildClient(a.delegatee); // the delegatee (agent) signs the pull
+    const mint = toAddress(a.mint);
+    const [subscriptionAuthority] = await findSubscriptionAuthorityPda({
+      user: toAddress(a.delegator),
+      tokenMint: mint,
+    });
+    const [delegationPda] = await findRecurringDelegationPda({
+      subscriptionAuthority,
+      delegator: toAddress(a.delegator),
+      delegatee: toAddress(a.delegatee.address),
+      nonce: a.nonce ?? 0n,
+    });
+    const delegatorAta = await this.ataFor(a.delegator, a.mint);
+    // A single pull (and cumulative pulls within a period) must be <= amountPerPeriod,
+    // else the program rejects (AMOUNT_EXCEEDS_PERIOD_LIMIT).
+    const sent: unknown = await client.subscriptions.instructions
+      .transferRecurring({
+        amount: a.amount,
+        delegatee: a.delegatee.signer,
+        delegationPda,
+        delegator: toAddress(a.delegator),
+        delegatorAta: toAddress(delegatorAta),
+        receiverAta: toAddress(a.merchantAta),
+        tokenMint: mint,
+        tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      })
+      .sendTransaction();
+    return { reference: extractSignature(sent), amount: a.amount };
+  }
+
+  async recurringStatus(a: AllowanceStatusArgs): Promise<AllowanceStatus> {
+    const client = await this.readClient();
+    const [subscriptionAuthority] = await findSubscriptionAuthorityPda({
+      user: toAddress(a.delegator),
+      tokenMint: toAddress(a.mint),
+    });
+    const [delegationPda] = await findRecurringDelegationPda({
+      subscriptionAuthority,
+      delegator: toAddress(a.delegator),
+      delegatee: toAddress(a.delegatee),
+      nonce: a.nonce ?? 0n,
+    });
+    const acct = await fetchMaybeRecurringDelegation(client.rpc, delegationPda);
+    if (!acct.exists) return { exists: false, remaining: 0n, expiresUnix: 0n };
+    const d = acct.data;
+    // amountPulledInPeriod resets when a new period begins on-chain; mirror that
+    // off-chain so the read reports the full cap once the period has rolled over.
+    const start = BigInt(d.currentPeriodStartTs);
+    const period = BigInt(d.periodLengthS);
+    const perPeriod = BigInt(d.amountPerPeriod);
+    const pulled = BigInt(d.amountPulledInPeriod);
+    const periodRolled = period > 0n && nowUnix() >= start + period;
+    const remaining = periodRolled ? perPeriod : perPeriod - pulled;
+    return { exists: true, remaining, expiresUnix: BigInt(d.expiryTs) };
   }
 
   async createPlan(a: CreatePlanArgs): Promise<void> {
