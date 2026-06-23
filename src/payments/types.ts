@@ -76,6 +76,11 @@ export interface CreatePlanArgs {
   /** Per-period price, in token base units. */
   amount: bigint;
   periodHours: bigint;
+  /**
+   * Allowed payout *owner* addresses (NOT token accounts). On charge, the
+   * program checks the receiver ATA is owned by one of these — passing an ATA
+   * here fails on-chain with UNAUTHORIZED_DESTINATION (#506).
+   */
   destinations: string[];
   pullers: string[];
   metadataUri: string;

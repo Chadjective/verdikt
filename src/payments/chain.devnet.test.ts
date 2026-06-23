@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { config } from "../config";
 import { ChainPayments } from "./chain";
-import { loadWallet } from "../solana/client";
+import { buildClient, createEphemeralWallet, loadWallet, toAddress } from "../solana/client";
+
+/** Read an SPL token account's balance (base units) via an independent client. */
+async function readTokenBalance(ata: string): Promise<bigint> {
+  const rc = await createEphemeralWallet().then(buildClient);
+  const r = await rc.rpc.getTokenAccountBalance(toAddress(ata)).send();
+  return BigInt(r.value.amount);
+}
 
 /**
  * Real on-chain integration test against the live Subscriptions & Allowances
@@ -85,6 +92,54 @@ describe.skipIf(!RUN)("ChainPayments — devnet integration", () => {
 
       const after = await chain.recurringStatus({ delegator: user.address, delegatee: agent.address, mint, nonce });
       expect(after.remaining).toBe(cap - pull);
+    },
+    180_000,
+  );
+
+  it(
+    "creates a plan, subscribes, and charges the period on-chain (subscription plan)",
+    async () => {
+      const chain = new ChainPayments();
+      const user = await loadWallet(config.keypairs.user); // subscriber
+      const merchant = await loadWallet(config.keypairs.merchant);
+      const mint = config.tokenMint;
+
+      const planId = BigInt(Date.now()); // unique plan PDA per run
+      const price = 10_000n;
+
+      await chain.createPlan({
+        merchant,
+        planId,
+        mint,
+        amount: price,
+        periodHours: 720n,
+        destinations: [merchant.address], // owner addresses, not ATAs (see chain.ts)
+        pullers: [merchant.address],
+        metadataUri: "https://avoid.net/plans/pro.json",
+      });
+
+      await chain.subscribe({ subscriber: user, merchant: merchant.address, planId, mint });
+      const active = await chain.isSubscriptionActive({
+        subscriber: user.address,
+        merchant: merchant.address,
+        planId,
+        mint,
+      });
+      expect(active).toBe(true);
+
+      const merchantAta = await chain.ataFor(merchant.address, mint);
+      const before = await readTokenBalance(merchantAta);
+      await chain.chargeSubscription({
+        caller: merchant,
+        subscriber: user.address,
+        merchant: merchant.address,
+        planId,
+        mint,
+        merchantAta,
+        amount: price,
+      });
+      const after = await readTokenBalance(merchantAta);
+      expect(after - before).toBe(price);
     },
     180_000,
   );

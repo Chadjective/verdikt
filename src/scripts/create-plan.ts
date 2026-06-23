@@ -19,7 +19,7 @@ async function main(): Promise<void> {
     mint,
     amount,
     periodHours,
-    destinations: [merchantAta],
+    destinations: [merchant.address], // destination *owners* — the program checks each charge's receiverAta is owned by one
     pullers: [merchant.address],
     metadataUri: "https://avoid.net/plans/pro.json",
   });
