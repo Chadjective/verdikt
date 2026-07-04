@@ -4,6 +4,7 @@ import { createPaymentBackend } from "../payments";
 import { loadWallet } from "../solana/client";
 import { investigate, lookup, type ThreatReport } from "../avoid/threatApi";
 import { createAnchor } from "../anchor";
+import { verifyBudgetOwnership } from "./auth";
 
 /**
  * Avoid.net metered threat API. Two settlement models on one allowance rail:
@@ -109,6 +110,25 @@ async function main(): Promise<void> {
     }
     if (!budgetOwner) {
       res.status(401).json({ error: "missing x-budget header (allowance owner address)" });
+      return;
+    }
+
+    // 0. Authorize: the caller must PROVE control of budgetOwner before we spend
+    //    its allowance. Without this, anyone can name a victim's address and
+    //    drain their investigation budget. Requires x-budget-ts + x-budget-sig
+    //    (an Ed25519 signature by budgetOwner over the canonical message).
+    const auth = await verifyBudgetOwnership({
+      budgetOwner,
+      entity,
+      ts: req.header("x-budget-ts"),
+      signature: req.header("x-budget-sig"),
+    });
+    if (!auth.ok) {
+      res.status(401).json({
+        error: "budget ownership not proven",
+        reason: auth.error,
+        hint: "Sign `verdikt:investigate:<entity>:<budgetOwner>:<unixSeconds>` with the budget owner key; send x-budget-ts and x-budget-sig (base58).",
+      });
       return;
     }
 
