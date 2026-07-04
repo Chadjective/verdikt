@@ -35,6 +35,23 @@ function nowUnix(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
 }
 
+/** Minimal shape of a jsonParsed getTransaction response we read in verifyPayment. */
+interface TokenBalance {
+  accountIndex: number;
+  mint: string;
+  uiTokenAmount: { amount: string };
+}
+interface TxWithTokenBalances {
+  meta: {
+    err: unknown;
+    preTokenBalances?: TokenBalance[];
+    postTokenBalances?: TokenBalance[];
+  } | null;
+  transaction: {
+    message: { accountKeys: (string | { pubkey: string })[] };
+  };
+}
+
 /** sendTransaction() resolves to the signature (string brand) or an object with one. */
 export function extractSignature(r: unknown): string {
   if (typeof r === "string") return r;
@@ -156,24 +173,56 @@ export class ChainPayments implements PaymentBackend {
   }
 
   async verifyPayment(a: VerifyPaymentArgs): Promise<boolean> {
-    // Replay protection (server-process lifetime).
+    // Replay protection (server-process lifetime; a multi-replica/durable
+    // deployment must back this with a shared spent-proof store).
     if (this.usedRefs.has(a.proof)) return false;
     try {
       const client = await this.readClient();
-      const res = await client.rpc.getSignatureStatuses([a.proof as Signature]).send();
-      const st = res.value[0];
-      if (!st || st.err) return false;
+      // Fetch the finalized tx and prove IT paid us: the merchant ATA's balance
+      // in the required mint must have increased by >= minAmount. Checking only
+      // that "some tx landed" (getSignatureStatuses) would accept ANY successful
+      // signature — e.g. an attacker's 1-lamport self-transfer — as free payment.
+      const tx = await (
+        client.rpc as unknown as {
+          getTransaction: (
+            sig: Signature,
+            cfg: {
+              commitment: "confirmed";
+              encoding: "jsonParsed";
+              maxSupportedTransactionVersion: number;
+            },
+          ) => { send: () => Promise<TxWithTokenBalances | null> };
+        }
+      )
+        .getTransaction(a.proof as Signature, {
+          commitment: "confirmed",
+          encoding: "jsonParsed",
+          maxSupportedTransactionVersion: 0,
+        })
+        .send();
+
+      if (!tx || tx.meta?.err) return false;
+
+      const keys = (tx.transaction?.message?.accountKeys ?? []).map((k) =>
+        typeof k === "string" ? k : k.pubkey,
+      );
+      const post = tx.meta?.postTokenBalances ?? [];
+      const pre = tx.meta?.preTokenBalances ?? [];
+
+      // The merchant ATA's post-balance row in the required mint.
+      const postRow = post.find(
+        (b) => keys[b.accountIndex] === a.merchantAta && b.mint === a.mint,
+      );
+      if (!postRow) return false;
+      const preRow = pre.find(
+        (b) => b.accountIndex === postRow.accountIndex && b.mint === a.mint,
+      );
+      const before = preRow ? BigInt(preRow.uiTokenAmount.amount) : 0n;
+      const after = BigInt(postRow.uiTokenAmount.amount);
+      if (after - before < a.minAmount) return false;
     } catch {
       return false;
     }
-    // NOTE: confirms the payment tx landed + replay; the allowance cap and the
-    // fixed server-side price bound the amount. A production gate would also
-    // assert amount/mint/receiver by parsing the tx token-balance deltas
-    // (mock mode demonstrates those full checks). minAmount/merchantAta/mint
-    // are part of the interface for that stricter implementation.
-    void a.minAmount;
-    void a.merchantAta;
-    void a.mint;
     this.usedRefs.add(a.proof);
     return true;
   }
